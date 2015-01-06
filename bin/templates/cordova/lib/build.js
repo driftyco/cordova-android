@@ -24,6 +24,7 @@ var shell   = require('shelljs'),
     Q       = require('q'),
     path    = require('path'),
     fs      = require('fs'),
+    os      = require('os'),
     ROOT    = path.join(__dirname, '..', '..');
 var check_reqs = require('./check_reqs');
 var exec  = require('./exec');
@@ -174,25 +175,6 @@ var builders = {
     },
     gradle: {
         getArgs: function(cmd, arch) {
-            var lintSteps;
-            if (process.env['BUILD_MULTIPLE_APKS']) {
-                lintSteps = [
-                    'lint',
-                    'lintVitalX86Release',
-                    'lintVitalArmv7Release',
-                    'compileLint',
-                    'copyReleaseLint',
-                    'copyDebugLint'
-                ];
-            } else {
-                lintSteps = [
-                    'lint',
-                    'lintVitalRelease',
-                    'compileLint',
-                    'copyReleaseLint',
-                    'copyDebugLint'
-                ];
-            }
             if (arch == 'arm' && cmd == 'debug') {
                 cmd = 'assembleArmv7Debug';
             } else if (arch == 'arm' && cmd == 'release') {
@@ -209,10 +191,6 @@ var builders = {
             var args = [cmd, '-b', path.join(ROOT, 'build.gradle')];
             // 10 seconds -> 6 seconds
             args.push('-Dorg.gradle.daemon=true');
-            // Excluding lint: 6s-> 1.6s
-            for (var i = 0; i < lintSteps.length; ++i) {
-                args.push('-x', lintSteps[i]);
-            }
             // Shaves another 100ms, but produces a "try at own risk" warning. Not worth it (yet):
             // args.push('-Dorg.gradle.parallel=true');
             return args;
@@ -237,10 +215,11 @@ var builders = {
                 shell.mkdir('-p', path.join(projectPath, 'gradle'));
                 shell.cp('-r', path.join(wrapperDir, 'gradle', 'wrapper'), path.join(projectPath, 'gradle'));
 
-                // If the gradle distribution URL is set, make sure it points to version 1.12.
+                // If the gradle distribution URL is set, make sure it points to version we want.
                 // If it's not set, do nothing, assuming that we're using a future version of gradle that we don't want to mess with.
-                var distributionUrlRegex = '/^distributionUrl=.*$/';
-                var distributionUrl = 'distributionUrl=http\\://services.gradle.org/distributions/gradle-1.12-all.zip';
+                // For some reason, using ^ and $ don't work.  This does the job, though.
+                var distributionUrlRegex = /distributionUrl.*zip/;
+                var distributionUrl = 'distributionUrl=http\\://services.gradle.org/distributions/gradle-2.2.1-all.zip';
                 var gradleWrapperPropertiesPath = path.join(projectPath, 'gradle', 'wrapper', 'gradle-wrapper.properties');
                 shell.sed('-i', distributionUrlRegex, distributionUrl, gradleWrapperPropertiesPath);
 
@@ -248,7 +227,9 @@ var builders = {
                 var pluginBuildGradle = path.join(projectPath, 'cordova', 'lib', 'plugin-build.gradle');
                 var subProjects = extractSubProjectPaths();
                 for (var i = 0; i < subProjects.length; ++i) {
-                    shell.cp('-f', pluginBuildGradle, path.join(ROOT, subProjects[i], 'build.gradle'));
+                    if (subProjects[i] !== 'CordovaLib') {
+                        shell.cp('-f', pluginBuildGradle, path.join(ROOT, subProjects[i], 'build.gradle'));
+                    }
                 }
 
                 var subProjectsAsGradlePaths = subProjects.map(function(p) { return ':' + p.replace(/[/\\]/g, ':') });
@@ -327,24 +308,41 @@ function parseOpts(options, resolvedTarget) {
     // Iterate through command line options
     for (var i=0; options && (i < options.length); ++i) {
         if (/^--/.exec(options[i])) {
-            var option = options[i].substring(2);
-            switch(option) {
+            var keyValue = options[i].substring(2).split('=');
+            var flagName = keyValue[0];
+            var flagValue = keyValue[1];
+            if ((flagName == 'versionCode' || flagName == 'minSdkVersion') && !flagValue) {
+                flagValue = options[i + 1];
+                ++i;
+            }
+            switch(flagName) {
                 case 'debug':
                 case 'release':
-                    ret.buildType = option;
+                    ret.buildType = flagName;
                     break;
                 case 'ant':
                 case 'gradle':
-                    ret.buildMethod = option;
+                    ret.buildMethod = flagName;
+                    break;
+                case 'device':
+                case 'emulator':
+                    // Don't need to do anything special to when building for device vs emulator.
+                    // iOS uses this flag to switch on architecture.
                     break;
                 case 'nobuild' :
                     ret.buildMethod = 'none';
                     break;
+                case 'versionCode':
+                    process.env['ANDROID_VERSION_CODE'] = flagValue;
+                    break;
+                case 'minSdkVersion':
+                    process.env['ANDROID_MIN_SDK_VERSION'] = flagValue;
+                    break;
                 default :
-                    return Q.reject('Build option \'' + options[i] + '\' not recognized.');
+                    console.warn('Build option --\'' + flagName + '\' not recognized (ignoring).');
             }
         } else {
-            return Q.reject('Build option \'' + options[i] + '\' not recognized.');
+            console.warn('Build option \'' + options[i] + '\' not recognized (ignoring).');
         }
     }
 
@@ -398,12 +396,44 @@ module.exports.run = function(options, optResolvedTarget) {
  * Returns "arm" or "x86".
  */
 module.exports.detectArchitecture = function(target) {
-    return exec('adb -s ' + target + ' shell cat /proc/cpuinfo')
-    .then(function(output) {
-        if (/intel/i.exec(output)) {
-            return 'x86';
+    function helper() {
+        return exec('adb -s ' + target + ' shell cat /proc/cpuinfo', os.tmpdir())
+        .then(function(output) {
+            if (/intel/i.exec(output)) {
+                return 'x86';
+            }
+            return 'arm';
+        });
+    }
+    // It sometimes happens (at least on OS X), that this command will hang forever.
+    // To fix it, either unplug & replug device, or restart adb server.
+    return helper().timeout(1000, 'Device communication timed out. Try unplugging & replugging the device.')
+    .then(null, function(err) {
+        if (/timed out/.exec('' + err)) {
+            // adb kill-server doesn't seem to do the trick.
+            // Could probably find a x-platform version of killall, but I'm not actually
+            // sure that this scenario even happens on non-OSX machines.
+            return exec('killall adb')
+            .then(function() {
+                console.log('adb seems hung. retrying.');
+                return helper()
+                .then(null, function() {
+                    // The double kill is sadly often necessary, at least on mac.
+                    console.log('Now device not found... restarting adb again.');
+                    return exec('killall adb')
+                    .then(function() {
+                        return helper()
+                        .then(null, function() {
+                            return Q.reject('USB is flakey. Try unplugging & replugging the device.');
+                        });
+                    });
+                });
+            }, function() {
+                // For non-killall OS's.
+                return Q.reject(err);
+            })
         }
-        return 'arm';
+        throw err;
     });
 };
 
@@ -429,12 +459,14 @@ module.exports.findBestApkForArchitecture = function(buildResults, arch) {
 };
 
 module.exports.help = function() {
-    console.log('Usage: ' + path.relative(process.cwd(), path.join(ROOT, 'cordova', 'build')) + ' [build_type]');
-    console.log('Build Types : ');
-    console.log('    \'--debug\': Default build, will build project in debug mode');
+    console.log('Usage: ' + path.relative(process.cwd(), path.join(ROOT, 'cordova', 'build')) + ' [flags]');
+    console.log('Flags:');
+    console.log('    \'--debug\': will build project in debug mode (default)');
     console.log('    \'--release\': will build project for release');
-    console.log('    \'--ant\': Default build, will build project with ant');
-    console.log('    \'--gradle\': will build project with gradle');
-    console.log('    \'--nobuild\': will skip build process (can be used with run command)');
+    console.log('    \'--ant\': will build project with ant');
+    console.log('    \'--gradle\': will build project with gradle (default)');
+    console.log('    \'--nobuild\': will skip build process (useful when using run command)');
+    console.log('    \'--versionCode=#\': Override versionCode for this build. Useful for uploading multiple APKs. Requires --gradle.');
+    console.log('    \'--minSdkVersion=#\': Override minSdkVersion for this build. Useful for uploading multiple APKs. Requires --gradle.');
     process.exit(0);
 };

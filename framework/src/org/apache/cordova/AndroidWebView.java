@@ -89,6 +89,7 @@ public class AndroidWebView extends WebView implements CordovaWebView {
     private Whitelist internalWhitelist;
     private Whitelist externalWhitelist;
     private CordovaPreferences preferences;
+    private CoreAndroid appPlugin;
     // The URL passed to loadUrl(), not necessarily the URL of the current page.
     String loadedUrl;
     
@@ -124,8 +125,9 @@ public class AndroidWebView extends WebView implements CordovaWebView {
         pluginManager = new PluginManager(this, this.cordova, pluginEntries);
         resourceApi = new CordovaResourceApi(this.getContext(), pluginManager);
         bridge = new CordovaBridge(pluginManager, new NativeToJsMessageQueue(this, cordova), this.cordova.getActivity().getPackageName());
-        pluginManager.addService("App", "org.apache.cordova.CoreAndroid");
         initWebViewSettings();
+        pluginManager.addService(CoreAndroid.PLUGIN_NAME, "org.apache.cordova.CoreAndroid");
+        pluginManager.init();
         
         if (this.viewClient == null) {
             setWebViewClient(Build.VERSION.SDK_INT < Build.VERSION_CODES.ICE_CREAM_SANDWICH ?
@@ -304,8 +306,11 @@ public class AndroidWebView extends WebView implements CordovaWebView {
         recreatePlugins = recreatePlugins || (loadedUrl == null);
 
         if (recreatePlugins) {
+            // Don't re-initialize on first load.
+            if (loadedUrl != null) {
+                this.pluginManager.init();
+            }
             this.loadedUrl = url;
-            this.pluginManager.init();
         }
 
         // Create a timeout timer for loadUrl
@@ -467,11 +472,11 @@ public class AndroidWebView extends WebView implements CordovaWebView {
         if(boundKeyCodes.contains(keyCode))
         {
             if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-                    this.loadUrl("javascript:cordova.fireDocumentEvent('volumedownbutton');");
+                    sendJavascriptEvent("volumedownbutton");
                     return true;
             }
             else if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                    this.loadUrl("javascript:cordova.fireDocumentEvent('volumeupbutton');");
+                    sendJavascriptEvent("volumeupbutton");
                     return true;
             }
             else
@@ -515,7 +520,7 @@ public class AndroidWebView extends WebView implements CordovaWebView {
                 // The webview is currently displayed
                 // If back key is bound, then send event to JavaScript
                 if (isButtonPlumbedToJs(KeyEvent.KEYCODE_BACK)) {
-                    this.loadUrl("javascript:cordova.fireDocumentEvent('backbutton');");
+                    sendJavascriptEvent("backbutton");
                     return true;
                 } else {
                     // If not bound
@@ -530,19 +535,31 @@ public class AndroidWebView extends WebView implements CordovaWebView {
         // Legacy
         else if (keyCode == KeyEvent.KEYCODE_MENU) {
             if (this.lastMenuEventTime < event.getEventTime()) {
-                this.loadUrl("javascript:cordova.fireDocumentEvent('menubutton');");
+                sendJavascriptEvent("menubutton");
             }
             this.lastMenuEventTime = event.getEventTime();
             return super.onKeyUp(keyCode, event);
         }
         // If search key
         else if (keyCode == KeyEvent.KEYCODE_SEARCH) {
-            this.loadUrl("javascript:cordova.fireDocumentEvent('searchbutton');");
+            sendJavascriptEvent("searchbutton");
             return true;
         }
 
         //Does webkit change this behavior?
         return super.onKeyUp(keyCode, event);
+    }
+
+    private void sendJavascriptEvent(String event) {
+        if (appPlugin == null) {
+            appPlugin = (CoreAndroid)this.pluginManager.getPlugin(CoreAndroid.PLUGIN_NAME);
+        }
+
+        if (appPlugin == null) {
+            LOG.w(TAG, "Unable to fire event without existing plugin");
+            return;
+        }
+        appPlugin.fireJavascriptEvent(event);
     }
 
     @Override
@@ -573,7 +590,7 @@ public class AndroidWebView extends WebView implements CordovaWebView {
     {
         LOG.d(TAG, "Handle the pause");
         // Send pause event to JavaScript
-        this.loadUrl("javascript:try{cordova.fireDocumentEvent('pause');}catch(e){console.log('exception firing pause event from native');};");
+        sendJavascriptEvent("pause");
 
         // Forward to plugins
         if (this.pluginManager != null) {
@@ -589,7 +606,7 @@ public class AndroidWebView extends WebView implements CordovaWebView {
     
     public void handleResume(boolean keepRunning, boolean activityResultKeepRunning)
     {
-        this.loadUrl("javascript:try{cordova.fireDocumentEvent('resume');}catch(e){console.log('exception firing resume event from native');};");
+        sendJavascriptEvent("resume");
         
         // Forward to plugins
         if (this.pluginManager != null) {
