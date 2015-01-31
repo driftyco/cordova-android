@@ -81,6 +81,7 @@ function copyJsAndLibrary(projectPath, shared, projectName) {
         shell.mkdir('-p', nestedCordovaLibPath);
         shell.cp('-f', path.join(ROOT, 'framework', 'AndroidManifest.xml'), nestedCordovaLibPath);
         shell.cp('-f', path.join(ROOT, 'framework', 'project.properties'), nestedCordovaLibPath);
+        shell.cp('-f', path.join(ROOT, 'framework', 'gradle.properties'), nestedCordovaLibPath);
         shell.cp('-f', path.join(ROOT, 'framework', 'build.gradle'), nestedCordovaLibPath);
         shell.cp('-f', path.join(ROOT, 'framework', 'cordova.gradle'), nestedCordovaLibPath);
         shell.cp('-r', path.join(ROOT, 'framework', 'src'), nestedCordovaLibPath);
