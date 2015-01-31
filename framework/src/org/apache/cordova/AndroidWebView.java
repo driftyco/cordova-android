@@ -66,6 +66,7 @@ public class AndroidWebView extends WebView implements CordovaWebView {
     private HashSet<Integer> boundKeyCodes = new HashSet<Integer>();
 
     PluginManager pluginManager;
+    AndroidCookieManager cookieManager;
 
     private BroadcastReceiver receiver;
 
@@ -124,6 +125,7 @@ public class AndroidWebView extends WebView implements CordovaWebView {
         this.preferences = preferences;
 
         pluginManager = new PluginManager(this, this.cordova, pluginEntries);
+        cookieManager = new AndroidCookieManager(this);
         resourceApi = new CordovaResourceApi(this.getContext(), pluginManager);
         bridge = new CordovaBridge(pluginManager, new NativeToJsMessageQueue(this, cordova), this.cordova.getActivity().getPackageName());
         initWebViewSettings();
@@ -136,17 +138,16 @@ public class AndroidWebView extends WebView implements CordovaWebView {
                 new IceCreamCordovaWebViewClient(cordova, this));
         }
 
-        if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
-        {
-            CookieManager cookieManager = CookieManager.getInstance();
-            cookieManager.setAcceptThirdPartyCookies(this, true);
-        }
 
         if (this.chromeClient == null) {
             setWebChromeClient(new AndroidChromeClient(cordova, this));
         }
 
         exposeJsInterface();
+
+        if (preferences.getBoolean("DisallowOverscroll", false)) {
+            setOverScrollMode(View.OVER_SCROLL_NEVER);
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -594,6 +595,7 @@ public class AndroidWebView extends WebView implements CordovaWebView {
         return boundKeyCodes.contains(keyCode);
     }
 
+    @Override
     public void handlePause(boolean keepRunning)
     {
         LOG.d(TAG, "Handle the pause");
@@ -607,22 +609,23 @@ public class AndroidWebView extends WebView implements CordovaWebView {
 
         // If app doesn't want to run in background
         if (!keepRunning) {
-            // Pause JavaScript timers (including setInterval)
+            // Pause JavaScript timers. This affects all webviews within the app!
             this.pauseTimers();
         }
     }
     
-    public void handleResume(boolean keepRunning, boolean activityResultKeepRunning)
+    @Override
+    public void handleResume(boolean keepRunning)
     {
+        // Resume JavaScript timers. This affects all webviews within the app!
+        this.resumeTimers();
+
         sendJavascriptEvent("resume");
         
         // Forward to plugins
         if (this.pluginManager != null) {
             this.pluginManager.onResume(keepRunning);
         }
-
-        // Resume JavaScript timers (including setInterval)
-        this.resumeTimers();
     }
     
     public void handleDestroy()
@@ -796,6 +799,11 @@ public class AndroidWebView extends WebView implements CordovaWebView {
     @Override
     public CordovaPreferences getPreferences() {
         return preferences;
+    }
+
+    @Override
+    public ICordovaCookieManager getCookieManager() {
+        return cookieManager;
     }
 
     @Override

@@ -25,7 +25,6 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -38,7 +37,6 @@ import android.graphics.Color;
 import android.media.AudioManager;
 import android.os.Bundle;
 import android.util.Log;
-import android.view.Display;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
@@ -96,7 +94,6 @@ public class CordovaActivity extends Activity implements CordovaInterface {
     // Plugin to call when activity result is received
     protected int activityResultRequestCode;
     protected CordovaPlugin activityResultCallback;
-    protected boolean activityResultKeepRunning;
 
     /*
      * The variables below are used to cache some of the activity properties.
@@ -157,11 +154,6 @@ public class CordovaActivity extends Activity implements CordovaInterface {
     
     protected void init() {
         appView = makeWebView();
-
-        // TODO: Have the views set this themselves.
-        if (preferences.getBoolean("DisallowOverscroll", false)) {
-            appView.getView().setOverScrollMode(View.OVER_SCROLL_NEVER);
-        }
         createViews();
 
         // Wire the hardware volume controls to control media if desired.
@@ -187,12 +179,7 @@ public class CordovaActivity extends Activity implements CordovaInterface {
 
     @SuppressWarnings("deprecation")
     protected void createViews() {
-        // This builds the view.  We could probably get away with NOT having a LinearLayout, but I like having a bucket!
-        Display display = getWindowManager().getDefaultDisplay();
-        int width = display.getWidth();
-        int height = display.getHeight();
-
-        LinearLayoutSoftKeyboardDetect root = new LinearLayoutSoftKeyboardDetect(this, width, height);
+        LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT, 0.0F));
@@ -225,40 +212,21 @@ public class CordovaActivity extends Activity implements CordovaInterface {
     }
 
     /**
-     * Construct the default web view object.
+     * Construct the CordovaWebView object.
      *
-     * This is intended to be overridable by subclasses of CordovaIntent which
-     * require a more specialized web view.
+     * Override this to customize the webview that is used.
      */
     protected CordovaWebView makeWebView() {
-        String r = preferences.getString("webView", null);
-        CordovaWebView ret = null;
-        if (r != null) {
-            try {
-                Class<?> webViewClass = Class.forName(r);
-                Constructor<?> constructor = webViewClass.getConstructor(Context.class);
-                ret = (CordovaWebView) constructor.newInstance((Context)this);
-            } catch (ClassNotFoundException e) {
-                e.printStackTrace();
-            } catch (InstantiationException e) {
-                e.printStackTrace();
-            } catch (IllegalAccessException e) {
-                e.printStackTrace();
-            } catch (IllegalArgumentException e) {
-                e.printStackTrace();
-            } catch (InvocationTargetException e) {
-                e.printStackTrace();
-            } catch (NoSuchMethodException e) {
-                e.printStackTrace();
-            }
+        String webViewClassName = preferences.getString("webView", AndroidWebView.class.getCanonicalName());
+        try {
+            Class<?> webViewClass = Class.forName(webViewClassName);
+            Constructor<?> constructor = webViewClass.getConstructor(Context.class);
+            CordovaWebView ret = (CordovaWebView) constructor.newInstance((Context)this);
+            ret.init(this, pluginEntries, internalWhitelist, externalWhitelist, preferences);
+            return ret;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create webview. ", e);
         }
-
-        if (ret == null) {
-            // If all else fails, return a default WebView
-            ret = new AndroidWebView(this);
-        }
-        ret.init(this, pluginEntries, internalWhitelist, externalWhitelist, preferences);
-        return ret;
     }
 
     /**
@@ -281,19 +249,14 @@ public class CordovaActivity extends Activity implements CordovaInterface {
     @Override
     protected void onPause() {
         super.onPause();
-
-        LOG.d(TAG, "Paused the application!");
+        LOG.d(TAG, "Paused the activity.");
 
         // Don't process pause if shutting down, since onDestroy() will be called
         if (this.activityState == ACTIVITY_EXITING) {
             return;
         }
 
-        if (this.appView == null) {
-            return;
-        }
-        else
-        {
+        if (this.appView != null) {
             this.appView.handlePause(this.keepRunning);
         }
     }
@@ -315,7 +278,7 @@ public class CordovaActivity extends Activity implements CordovaInterface {
     @Override
     protected void onResume() {
         super.onResume();
-        LOG.d(TAG, "Resuming the App");
+        LOG.d(TAG, "Resumed the activity.");
         
         if (this.activityState == ACTIVITY_STARTING) {
             this.activityState = ACTIVITY_RUNNING;
@@ -329,17 +292,7 @@ public class CordovaActivity extends Activity implements CordovaInterface {
         // receive user input. Workaround for some devices (Samsung Galaxy Note 3 at least)
         this.getWindow().getDecorView().requestFocus();
 
-        this.appView.handleResume(this.keepRunning, this.activityResultKeepRunning);
-
-        // If app doesn't want to run in background
-        if (!this.keepRunning || this.activityResultKeepRunning) {
-
-            // Restore multitasking state
-            if (this.activityResultKeepRunning) {
-                this.keepRunning = this.activityResultKeepRunning;
-                this.activityResultKeepRunning = false;
-            }
-        }
+        this.appView.handleResume(this.keepRunning);
     }
 
     /**
@@ -382,13 +335,6 @@ public class CordovaActivity extends Activity implements CordovaInterface {
      */
     public void startActivityForResult(CordovaPlugin command, Intent intent, int requestCode) {
         setActivityResultCallback(command);
-        this.activityResultKeepRunning = this.keepRunning;
-
-        // If multitasking turned on, then disable it for activities that return results
-        if (command != null) {
-            this.keepRunning = false;
-        }
-
         try {
             startActivityForResult(intent, requestCode);
         } catch (RuntimeException e) { // E.g.: ActivityNotFoundException
