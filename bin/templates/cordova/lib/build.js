@@ -19,6 +19,8 @@
        under the License.
 */
 
+/* jshint sub:true */
+
 var shell   = require('shelljs'),
     spawn   = require('./spawn'),
     Q       = require('q'),
@@ -73,7 +75,9 @@ function findOutputApksHelper(dir, build_type, arch) {
     var archSpecific = !!/-x86|-arm/.exec(ret[0]);
     // And show only arch-specific ones (or non-arch-specific)
     ret = ret.filter(function(p) {
+        /*jshint -W018 */
         return !!/-x86|-arm/.exec(p) == archSpecific;
+        /*jshint +W018 */
     });
     if (arch && ret.length > 1) {
         ret = ret.filter(function(p) {
@@ -97,23 +101,21 @@ function extractProjectNameFromManifest(projectPath) {
     return m[1];
 }
 
-function extractSubProjectPaths() {
-    var data = fs.readFileSync(path.join(ROOT, 'project.properties'), 'utf8');
-    var libsSet = {};
-    var r = /^\s*android\.library\.reference\.\d+=(.*)(?:\s|$)/mg
+function findAllUniq(data, r) {
+    var s = {};
     var m;
-    while (m = r.exec(data)) {
-        libsSet[m[1]] = 1;
+    while ((m = r.exec(data))) {
+        s[m[1]] = 1;
     }
-    var gradleSet = {};
-    r = /^\s*cordova\.gradle\.include\.\d+=(.*)(?:\s|$)/mg
-    m;
-    while (m = r.exec(data)) {
-        gradleSet[m[1]] = 1;
-    }
+    return Object.keys(s);
+}
+
+function readProjectProperties() {
+    var data = fs.readFileSync(path.join(ROOT, 'project.properties'), 'utf8');
     return {
-      libs: Object.keys(libsSet),
-      gradleIncludes: Object.keys(gradleSet)
+        libs: findAllUniq(data, /^\s*android\.library\.reference\.\d+=(.*)(?:\s|$)/mg),
+        gradleIncludes: findAllUniq(data, /^\s*cordova\.gradle\.include\.\d+=(.*)(?:\s|$)/mg),
+        systemLibs: findAllUniq(data, /^\s*cordova\.system\.library\.\d+=(.*)(?:\s|$)/mg)
     };
 }
 
@@ -143,10 +145,14 @@ var builders = {
                         fs.writeFileSync(path.join(projectPath, 'local.properties'), LOCAL_PROPERTIES_TEMPLATE);
                     }
                 }
-                var subProjects = extractSubProjectPaths().libs;
                 writeBuildXml(ROOT);
+                var propertiesObj = readProjectProperties();
+                var subProjects = propertiesObj.libs;
                 for (var i = 0; i < subProjects.length; ++i) {
                     writeBuildXml(path.join(ROOT, subProjects[i]));
+                }
+                if (propertiesObj.systemLibs.length > 0) {
+                    throw new Error('Project contains at least one plugin that requires a system library. This is not supported with ANT. Please build using gradle.');
                 }
             });
         },
@@ -163,7 +169,6 @@ var builders = {
                 ret = this.clean();
             }
 
-            var builder = this;
             var args = this.getArgs(build_type == 'debug' ? 'debug' : 'release');
             return check_reqs.check_ant()
             .then(function() {
@@ -233,7 +238,7 @@ var builders = {
 
                 // Update the version of build.gradle in each dependent library.
                 var pluginBuildGradle = path.join(projectPath, 'cordova', 'lib', 'plugin-build.gradle');
-                var propertiesObj = extractSubProjectPaths();
+                var propertiesObj = readProjectProperties();
                 var subProjects = propertiesObj.libs;
                 for (var i = 0; i < subProjects.length; ++i) {
                     if (subProjects[i] !== 'CordovaLib') {
@@ -241,7 +246,7 @@ var builders = {
                     }
                 }
 
-                var subProjectsAsGradlePaths = subProjects.map(function(p) { return ':' + p.replace(/[/\\]/g, ':') });
+                var subProjectsAsGradlePaths = subProjects.map(function(p) { return ':' + p.replace(/[/\\]/g, ':'); });
                 // Write the settings.gradle file.
                 fs.writeFileSync(path.join(projectPath, 'settings.gradle'),
                     '// GENERATED FILE - DO NOT EDIT\n' +
@@ -253,6 +258,30 @@ var builders = {
                 subProjectsAsGradlePaths.forEach(function(p) {
                     depsList += '    debugCompile project(path: "' + p + '", configuration: "debug")\n';
                     depsList += '    releaseCompile project(path: "' + p + '", configuration: "release")\n';
+                });
+                // For why we do this mapping: https://issues.apache.org/jira/browse/CB-8390
+                var SYSTEM_LIBRARY_MAPPINGS = [
+                    [/^\/?extras\/android\/support\/(.*)$/, 'com.android.support:support-$1:+'],
+                    [/^\/?google\/google_play_services\/libproject\/google-play-services_lib\/?$/, 'com.google.android.gms:play-services:+']
+                ];
+                propertiesObj.systemLibs.forEach(function(p) {
+                    var mavenRef;
+                    // It's already in gradle form if it has two ':'s
+                    if (/:.*:/.exec(p)) {
+                        mavenRef = p;
+                    } else {
+                        for (var i = 0; i < SYSTEM_LIBRARY_MAPPINGS.length; ++i) {
+                            var pair = SYSTEM_LIBRARY_MAPPINGS[i];
+                            if (pair[0].exec(p)) {
+                                mavenRef = p.replace(pair[0], pair[1]);
+                                break;
+                            }
+                        }
+                        if (!mavenRef) {
+                            throw new Error('Unsupported system library (does not work with gradle): ' + p);
+                        }
+                    }
+                    depsList += '    compile "' + mavenRef + '"\n';
                 });
                 buildGradle = buildGradle.replace(/(SUB-PROJECT DEPENDENCIES START)[\s\S]*(\/\/ SUB-PROJECT DEPENDENCIES END)/, '$1\n' + depsList + '    $2');
                 var includeList = '';
@@ -269,7 +298,6 @@ var builders = {
          * Returns a promise.
          */
         build: function(build_type, arch, extraArgs) {
-            var builder = this;
             var wrapper = path.join(ROOT, 'gradlew');
             var args = this.getArgs(build_type == 'debug' ? 'debug' : 'release', arch, extraArgs);
             return Q().then(function() {
@@ -313,7 +341,7 @@ var builders = {
 
 function parseOpts(options, resolvedTarget) {
     // Backwards-compatibility: Allow a single string argument
-    if (typeof options == "string") options = [options];
+    if (typeof options == 'string') options = [options];
 
     var ret = {
         buildType: 'debug',
@@ -454,7 +482,7 @@ module.exports.detectArchitecture = function(target) {
             }, function() {
                 // For non-killall OS's.
                 return Q.reject(err);
-            })
+            });
         }
         throw err;
     });
