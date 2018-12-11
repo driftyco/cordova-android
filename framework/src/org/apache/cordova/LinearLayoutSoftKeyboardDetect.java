@@ -18,7 +18,7 @@
 */
 package org.apache.cordova;
 
-import org.apache.cordova.api.LOG;
+import org.apache.cordova.LOG;
 
 import android.content.Context;
 //import android.view.View.MeasureSpec;
@@ -35,13 +35,13 @@ public class LinearLayoutSoftKeyboardDetect extends LinearLayout {
     private int oldWidth = 0; // Need to save old width for orientation change
     private int screenWidth = 0;
     private int screenHeight = 0;
-    private DroidGap app = null;
+    private CordovaActivity app = null;
 
     public LinearLayoutSoftKeyboardDetect(Context context, int width, int height) {
         super(context);
         screenWidth = width;
         screenHeight = height;
-        app = (DroidGap) context;
+        app = (CordovaActivity) context;
     }
 
     @Override
@@ -88,13 +88,13 @@ public class LinearLayoutSoftKeyboardDetect extends LinearLayout {
         // gone away.
         else if (height > oldHeight) {
             if (app != null)
-                app.appView.sendJavascript("cordova.fireDocumentEvent('hidekeyboard');");
+                app.sendJavascript("cordova.fireDocumentEvent('hidekeyboard');");
         }
         // If the height as gotten smaller then we will assume the soft keyboard has 
         // been displayed.
         else if (height < oldHeight) {
             if (app != null)
-                app.appView.sendJavascript("cordova.fireDocumentEvent('showkeyboard');");
+                app.sendJavascript("cordova.fireDocumentEvent('showkeyboard');");
         }
 
         // Update the old height for the next event

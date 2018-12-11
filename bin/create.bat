@@ -16,17 +16,11 @@
 :: under the License.
 
 @ECHO OFF
-IF NOT DEFINED JAVA_HOME GOTO MISSING
-FOR %%X in (java.exe javac.exe ant.bat android.bat) do (
-    SET FOUND=%%~$PATH:X
-    IF NOT DEFINED FOUND GOTO MISSING
+SET script_path="%~dp0create"
+IF EXIST %script_path% (
+    node %script_path% %*
+) ELSE (
+    ECHO.
+    ECHO ERROR: Could not find 'create' script in 'bin' folder, aborting...>&2
+    EXIT /B 1
 )
-cscript "%~dp0\create.js" %*
-GOTO END
-:MISSING
-ECHO Missing one of the following:
-ECHO JDK: http://java.oracle.com
-ECHO Android SDK: http://developer.android.com
-ECHO Apache ant: http://ant.apache.org
-EXIT /B 1
-:END

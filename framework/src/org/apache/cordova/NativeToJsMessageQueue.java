@@ -22,8 +22,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.LinkedList;
 
-import org.apache.cordova.api.CordovaInterface;
-import org.apache.cordova.api.PluginResult;
+import org.apache.cordova.CordovaInterface;
+import org.apache.cordova.PluginResult;
 
 import android.os.Message;
 import android.util.Log;
@@ -35,7 +35,7 @@ import android.webkit.WebView;
 public class NativeToJsMessageQueue {
     private static final String LOG_TAG = "JsMessageQueue";
 
-    // This must match the default value in incubator-cordova-js/lib/android/exec.js
+    // This must match the default value in cordova-js/lib/android/exec.js
     private static final int DEFAULT_BRIDGE_MODE = 2;
     
     // Set this to true to force plugin results to be encoding as
@@ -44,19 +44,16 @@ public class NativeToJsMessageQueue {
 
     // Disable URL-based exec() bridge by default since it's a bit of a
     // security concern.
-    static final boolean ENABLE_LOCATION_CHANGE_EXEC_MODE = false;
+    public static final boolean ENABLE_LOCATION_CHANGE_EXEC_MODE = false;
         
     // Disable sending back native->JS messages during an exec() when the active
     // exec() is asynchronous. Set this to true when running bridge benchmarks.
-    static final boolean DISABLE_EXEC_CHAINING = false;
+    public static final boolean DISABLE_EXEC_CHAINING = false;
     
-    // Upper limit for how much data to send to JS in one shot.
-    // TODO(agrieve): This is currently disable. It should be re-enabled once we
-    // remove support for returning values from exec() calls. This was
-    // deprecated in 2.2.0.
-    // Also, this currently only chops up on message boundaries. It may be useful
+    // Arbitrarily chosen upper limit for how much data to send to JS in one shot.
+    // This currently only chops up on message boundaries. It may be useful
     // to allow it to break up messages.
-    private static int MAX_PAYLOAD_SIZE = -1; //50 * 1024 * 10240;
+    private static int MAX_PAYLOAD_SIZE = 50 * 1024 * 10240;
     
     /**
      * The index into registeredListeners to treat as active. 
@@ -86,7 +83,7 @@ public class NativeToJsMessageQueue {
         this.cordova = cordova;
         this.webView = webView;
         registeredListeners = new BridgeMode[4];
-        registeredListeners[0] = null;  // Polling. Requires no logic.
+        registeredListeners[0] = new PollingBridgeMode();
         registeredListeners[1] = new LoadUrlBridgeMode();
         registeredListeners[2] = new OnlineEventsBridgeMode();
         registeredListeners[3] = new PrivateApiBridgeMode();
@@ -105,7 +102,8 @@ public class NativeToJsMessageQueue {
                 synchronized (this) {
                     activeListenerIndex = value;
                     BridgeMode activeListener = registeredListeners[value];
-                    if (!paused && !queue.isEmpty() && activeListener != null) {
+                    activeListener.reset();
+                    if (!paused && !queue.isEmpty()) {
                         activeListener.onNativeToJsMessageAvailable();
                     }
                 }
@@ -120,6 +118,7 @@ public class NativeToJsMessageQueue {
         synchronized (this) {
             queue.clear();
             setBridgeMode(DEFAULT_BRIDGE_MODE);
+            registeredListeners[activeListenerIndex].reset();
         }
     }
 
@@ -130,7 +129,8 @@ public class NativeToJsMessageQueue {
     }
     
     private void packMessage(JsMessage message, StringBuilder sb) {
-        sb.append(message.calculateEncodedLength())
+        int len = message.calculateEncodedLength();
+        sb.append(len)
           .append(' ');
         message.encodeAsMessage(sb);
     }
@@ -140,8 +140,9 @@ public class NativeToJsMessageQueue {
      * Combines as many messages as possible, while staying under MAX_PAYLOAD_SIZE.
      * Returns null if the queue is empty.
      */
-    public String popAndEncode() {
+    public String popAndEncode(boolean fromOnlineEvent) {
         synchronized (this) {
+            registeredListeners[activeListenerIndex].notifyOfFlush(fromOnlineEvent);
             if (queue.isEmpty()) {
                 return null;
             }
@@ -166,7 +167,8 @@ public class NativeToJsMessageQueue {
                 // Attach a char to indicate that there are more messages pending.
                 sb.append('*');
             }
-            return sb.toString();
+            String ret = sb.toString();
+            return ret;
         }
     }
     
@@ -209,7 +211,8 @@ public class NativeToJsMessageQueue {
             for (int i = willSendAllMessages ? 1 : 0; i < numMessagesToSend; ++i) {
                 sb.append('}');
             }
-            return sb.toString();
+            String ret = sb.toString();
+            return ret;
         }
     }   
 
@@ -248,7 +251,7 @@ public class NativeToJsMessageQueue {
     private void enqueueMessage(JsMessage message) {
         synchronized (this) {
             queue.add(message);
-            if (!paused && registeredListeners[activeListenerIndex] != null) {
+            if (!paused) {
                 registeredListeners[activeListenerIndex].onNativeToJsMessageAvailable();
             }
         }        
@@ -263,7 +266,7 @@ public class NativeToJsMessageQueue {
         paused = value;
         if (!value) {
             synchronized (this) {
-                if (!queue.isEmpty() && registeredListeners[activeListenerIndex] != null) {
+                if (!queue.isEmpty()) {
                     registeredListeners[activeListenerIndex].onNativeToJsMessageAvailable();
                 }
             }   
@@ -274,12 +277,20 @@ public class NativeToJsMessageQueue {
         return paused;
     }
 
-    private interface BridgeMode {
-        void onNativeToJsMessageAvailable();
+    private abstract class BridgeMode {
+        abstract void onNativeToJsMessageAvailable();
+        void notifyOfFlush(boolean fromOnlineEvent) {}
+        void reset() {}
     }
-    
+
+    /** Uses JS polls for messages on a timer.. */
+    private class PollingBridgeMode extends BridgeMode {
+        @Override void onNativeToJsMessageAvailable() {
+        }
+    }
+
     /** Uses webView.loadUrl("javascript:") to execute messages. */
-    private class LoadUrlBridgeMode implements BridgeMode {
+    private class LoadUrlBridgeMode extends BridgeMode {
         final Runnable runnable = new Runnable() {
             public void run() {
                 String js = popAndEncodeAsJs();
@@ -289,27 +300,33 @@ public class NativeToJsMessageQueue {
             }
         };
         
-        public void onNativeToJsMessageAvailable() {
+        @Override void onNativeToJsMessageAvailable() {
             cordova.getActivity().runOnUiThread(runnable);
         }
     }
 
     /** Uses online/offline events to tell the JS when to poll for messages. */
-    private class OnlineEventsBridgeMode implements BridgeMode {
-        boolean online = true;
+    private class OnlineEventsBridgeMode extends BridgeMode {
+        private boolean online;
         final Runnable runnable = new Runnable() {
             public void run() {
                 if (!queue.isEmpty()) {
-                    online = !online;
                     webView.setNetworkAvailable(online);
                 }
             }                
         };
-        OnlineEventsBridgeMode() {
+        @Override void reset() {
+            online = false;
             webView.setNetworkAvailable(true);
         }
-        public void onNativeToJsMessageAvailable() {
+        @Override void onNativeToJsMessageAvailable() {
             cordova.getActivity().runOnUiThread(runnable);
+        }
+        // Track when online/offline events are fired so that we don't fire excess events.
+        @Override void notifyOfFlush(boolean fromOnlineEvent) {
+            if (fromOnlineEvent) {
+                online = !online;
+            }
         }
     }
     
@@ -317,7 +334,7 @@ public class NativeToJsMessageQueue {
      * Uses Java reflection to access an API that lets us eval JS.
      * Requires Android 3.2.4 or above. 
      */
-    private class PrivateApiBridgeMode implements BridgeMode {
+    private class PrivateApiBridgeMode extends BridgeMode {
     	// Message added in commit:
     	// http://omapzoom.org/?p=platform/frameworks/base.git;a=commitdiff;h=9497c5f8c4bc7c47789e5ccde01179abc31ffeb2
     	// Which first appeared in 3.2.4ish.
@@ -355,7 +372,7 @@ public class NativeToJsMessageQueue {
     		}
     	}
     	
-        public void onNativeToJsMessageAvailable() {
+        @Override void onNativeToJsMessageAvailable() {
         	if (sendMessageMethod == null && !initFailed) {
         		initReflection();
         	}
@@ -406,6 +423,12 @@ public class NativeToJsMessageQueue {
                 case PluginResult.MESSAGE_TYPE_STRING: // s
                     ret += 1 + pluginResult.getStrMessage().length();
                     break;
+                case PluginResult.MESSAGE_TYPE_BINARYSTRING:
+                    ret += 1 + pluginResult.getMessage().length();
+                    break;
+                case PluginResult.MESSAGE_TYPE_ARRAYBUFFER:
+                    ret += 1 + pluginResult.getMessage().length();
+                    break;
                 case PluginResult.MESSAGE_TYPE_JSON:
                 default:
                     ret += pluginResult.getMessage().length();
@@ -445,6 +468,14 @@ public class NativeToJsMessageQueue {
                     sb.append('s');
                     sb.append(pluginResult.getStrMessage());
                     break;
+                case PluginResult.MESSAGE_TYPE_BINARYSTRING: // S
+                    sb.append('S');
+                    sb.append(pluginResult.getMessage());
+                    break;                    
+                case PluginResult.MESSAGE_TYPE_ARRAYBUFFER: // A
+                    sb.append('A');
+                    sb.append(pluginResult.getMessage());
+                    break;
                 case PluginResult.MESSAGE_TYPE_JSON:
                 default:
                     sb.append(pluginResult.getMessage()); // [ or {
@@ -463,9 +494,22 @@ public class NativeToJsMessageQueue {
                   .append(success)
                   .append(",")
                   .append(status)
-                  .append(",")
-                  .append(pluginResult.getMessage())
-                  .append(",")
+                  .append(",[");
+                switch (pluginResult.getMessageType()) {
+                    case PluginResult.MESSAGE_TYPE_BINARYSTRING:
+                        sb.append("atob('")
+                          .append(pluginResult.getMessage())
+                          .append("')");
+                        break;
+                    case PluginResult.MESSAGE_TYPE_ARRAYBUFFER:
+                        sb.append("cordova.require('cordova/base64').toArrayBuffer('")
+                          .append(pluginResult.getMessage())
+                          .append("')");
+                        break;
+                    default:
+                    sb.append(pluginResult.getMessage());
+                }
+                sb.append("],")
                   .append(pluginResult.getKeepCallback())
                   .append(");");
             }

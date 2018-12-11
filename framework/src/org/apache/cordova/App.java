@@ -19,20 +19,42 @@
 
 package org.apache.cordova;
 
-import org.apache.cordova.api.CallbackContext;
-import org.apache.cordova.api.CordovaPlugin;
-import org.apache.cordova.api.LOG;
-import org.apache.cordova.api.PluginResult;
+import org.apache.cordova.CallbackContext;
+import org.apache.cordova.CordovaPlugin;
+import org.apache.cordova.LOG;
+import org.apache.cordova.PluginResult;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.telephony.TelephonyManager;
+
 import java.util.HashMap;
 
 /**
- * This class exposes methods in DroidGap that can be called from JavaScript.
+ * This class exposes methods in Cordova that can be called from JavaScript.
  */
 public class App extends CordovaPlugin {
+
+    protected static final String TAG = "CordovaApp";
+    private BroadcastReceiver telephonyReceiver;
+
+    /**
+     * Sets the context of the Command. This can then be used to do things like
+     * get file paths associated with the Activity.
+     *
+     * @param cordova The context of the main Activity.
+     * @param webView The CordovaWebView Cordova is running in.
+     */
+    public void initialize(CordovaInterface cordova, CordovaWebView webView) {
+        super.initialize(cordova, webView);
+        this.initTelephonyReceiver();
+    }
+
 
     /**
      * Executes the request and returns PluginResult.
@@ -97,14 +119,18 @@ public class App extends CordovaPlugin {
      * Clear the resource cache.
      */
     public void clearCache() {
-        this.webView.clearCache(true);
+        cordova.getActivity().runOnUiThread(new Runnable() {
+            public void run() {
+                webView.clearCache(true);
+            }
+        });
     }
 
     /**
      * Load the url into the webview.
      *
      * @param url
-     * @param props			Properties that can be passed in to the DroidGap activity (i.e. loadingDialog, wait, ...)
+     * @param props			Properties that can be passed in to the Cordova activity (i.e. loadingDialog, wait, ...)
      * @throws JSONException
      */
     public void loadUrl(String url, JSONObject props) throws JSONException {
@@ -186,7 +212,7 @@ public class App extends CordovaPlugin {
      * @param override		T=override, F=cancel override
      */
     public void overrideBackbutton(boolean override) {
-        LOG.i("App", "WARNING: Back Button Default Behaviour will be overridden.  The backbutton event will be fired!");
+        LOG.i("App", "WARNING: Back Button Default Behavior will be overridden.  The backbutton event will be fired!");
         webView.bindButton(override);
     }
 
@@ -198,7 +224,7 @@ public class App extends CordovaPlugin {
      * @param override      T=override, F=cancel override
      */
     public void overrideButton(String button, boolean override) {
-        LOG.i("DroidGap", "WARNING: Volume Button Default Behaviour will be overridden.  The volume event will be fired!");
+        LOG.i("App", "WARNING: Volume Button Default Behavior will be overridden.  The volume event will be fired!");
         webView.bindButton(button, override);
     }
 
@@ -217,5 +243,53 @@ public class App extends CordovaPlugin {
     public void exitApp() {
         this.webView.postMessage("exit", null);
     }
+    
 
+    /**
+     * Listen for telephony events: RINGING, OFFHOOK and IDLE
+     * Send these events to all plugins using
+     *      CordovaActivity.onMessage("telephone", "ringing" | "offhook" | "idle")
+     */
+    private void initTelephonyReceiver() {
+        IntentFilter intentFilter = new IntentFilter();
+        intentFilter.addAction(TelephonyManager.ACTION_PHONE_STATE_CHANGED);
+        //final CordovaInterface mycordova = this.cordova;
+        this.telephonyReceiver = new BroadcastReceiver() {
+
+            @Override
+            public void onReceive(Context context, Intent intent) {
+
+                // If state has changed
+                if ((intent != null) && intent.getAction().equals(TelephonyManager.ACTION_PHONE_STATE_CHANGED)) {
+                    if (intent.hasExtra(TelephonyManager.EXTRA_STATE)) {
+                        String extraData = intent.getStringExtra(TelephonyManager.EXTRA_STATE);
+                        if (extraData.equals(TelephonyManager.EXTRA_STATE_RINGING)) {
+                            LOG.i(TAG, "Telephone RINGING");
+                            webView.postMessage("telephone", "ringing");
+                        }
+                        else if (extraData.equals(TelephonyManager.EXTRA_STATE_OFFHOOK)) {
+                            LOG.i(TAG, "Telephone OFFHOOK");
+                            webView.postMessage("telephone", "offhook");
+                        }
+                        else if (extraData.equals(TelephonyManager.EXTRA_STATE_IDLE)) {
+                            LOG.i(TAG, "Telephone IDLE");
+                            webView.postMessage("telephone", "idle");
+                        }
+                    }
+                }
+            }
+        };
+
+        // Register the receiver
+        this.cordova.getActivity().registerReceiver(this.telephonyReceiver, intentFilter);
+    }
+
+    /*
+     * Unregister the receiver
+     *
+     */
+    public void onDestroy()
+    {
+        this.cordova.getActivity().unregisterReceiver(this.telephonyReceiver);
+    }
 }
